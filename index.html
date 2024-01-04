@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>Images Stitcher</title>
+</head>
+
+<body>
+  <h2>Images Stitcher</h2>
+  <p id="status">OpenCV.js is loading...</p>
+  <p id="uploadInstruction">Please upload images to stitch, and wait it to process it.</p>
+
+  <div>
+    <div id="input">
+      <input type="file" id="imageInput" accept="image/*" multiple>
+    </div>
+    <div id="output" style="display: none;">
+      <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <h1>Stitched images:</h1>
+        <button id="downloadBtn" disabled>Download Stitched Image</button>
+      </div>
+      <canvas id="canvasImagesStitched"></canvas>
+      <div>
+        <h1>Images used with matching features:</h1>
+        <div id="canvasContainer" style="display: flex; flex-direction: column; align-items: flex-start; gap: 32px;"></div>
+      </div>
+    </div>
+
+  </div>
+  <script type="text/javascript">
+    var Module = {
+      // https://emscripten.org/docs/api_reference/module.html#Module.onRuntimeInitialized
+      onRuntimeInitialized() {
+        document.getElementById('status').innerHTML = 'OpenCV.js is ready.';
+      }
+    };
+
+    document.getElementById('downloadBtn').addEventListener('click', function () {
+      let canvas = document.getElementById('canvasImagesStitched');
+      let image = canvas.toDataURL('image/png').replace('image/png', 'image/octet-stream'); // Convert canvas content to data URL
+      let link = document.createElement('a');
+
+      link.download = 'stitched_image.png';
+      link.href = image;
+      link.click();
+    });
+
+    document.getElementById('imageInput').addEventListener('change', async function (event) {
+      if (event.target.files.length < 2) {
+        alert('Please select at least two images.');
+        return;
+      }
+      // reset the canvas container
+      resetStitching();
+
+      let images = [];
+      for (let i = 0; i < event.target.files.length; i++) {
+        let url = URL.createObjectURL(event.target.files[i]);
+        let imageElement = await loadImageToCanvas(url, i);
+        images.push({ img: imageElement });
+      }
+
+      stitchImagesSequentially(images)
+        .then(onStitchingComplete)
+        .catch(error => console.error('Processing failed:', error));
+    });
+
+    async function loadImageToCanvas(url, index) {
+      return new Promise((resolve, reject) => {
+        let canvasId = 'canvas' + index;
+        let canvasContainer = document.getElementById('canvasContainer');
+        let newCanvas = document.createElement('canvas');
+        newCanvas.id = canvasId;
+        canvasContainer.appendChild(newCanvas);
+
+        let img = new Image();
+        img.onload = () => {
+          let canvas = document.getElementById(canvasId);
+          let ctx = canvas.getContext('2d');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0, img.width, img.height);
+          resolve(img);
+        };
+        img.onerror = reject;
+        img.src = url;
+      });
+    }
+
+    function resetStitching() {
+      document.getElementById('output').style.display = 'none';
+      document.getElementById('canvasContainer').innerHTML = '';
+      let canvas = document.getElementById('canvasImagesStitched');
+      let ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      downloadBtn.disabled = true;
+    }
+
+    function onStitchingComplete(success) {
+
+      let downloadBtn = document.getElementById('downloadBtn');
+      let uploadInstruction = document.getElementById('uploadInstruction');
+
+      // Enable download button and update/hide instruction
+      if(success) {
+        document.getElementById('output').style.display = 'block';
+        downloadBtn.disabled = false;
+      }
+    }
+
+    function extractROIs(mat) {
+      const height = mat.rows;
+      const width = mat.cols;
+      const roiSize = 50; // Size of the ROI
+
+      const rois = [
+        // the complete image
+        new cv.Rect(0, 0, width, height),
+
+        // Corners
+        new cv.Rect(0, 0, roiSize, roiSize), // Top-left corner
+        new cv.Rect(width - roiSize, 0, roiSize, roiSize), // Top-right corner
+        new cv.Rect(0, height - roiSize, roiSize, roiSize), // Bottom-left corner
+        new cv.Rect(width - roiSize, height - roiSize, roiSize, roiSize), // Bottom-right corner
+
+        // Middle of each edge
+        new cv.Rect(width / 2 - roiSize / 2, 0, roiSize, roiSize), // Top edge
+        new cv.Rect(width / 2 - roiSize / 2, height - roiSize, roiSize, roiSize), // Bottom edge
+        new cv.Rect(0, height / 2 - roiSize / 2, roiSize, roiSize), // Left edge
+        new cv.Rect(width - roiSize, height / 2 - roiSize / 2, roiSize, roiSize), // Right edge
+
+        // Center of the image
+        new cv.Rect(width / 2 - roiSize / 2, height / 2 - roiSize / 2, roiSize, roiSize) // Center
+      ];
+
+      return rois.map(roi => mat.roi(roi));
+    }
+
+    function detectFeatures(image, nbFeatures) {
+      let orb = new cv.ORB(nbFeatures);
+      let keypoints = new cv.KeyPointVector();
+      let descriptors = new cv.Mat();
+
+      orb.detectAndCompute(image, new cv.Mat(), keypoints, descriptors);
+
+      return { keypoints, descriptors };
+    }
+
+    function matchFeatures(descriptors1, descriptors2, threshold) {
+      let matches = new cv.DMatchVector();
+      let matcher = new cv.BFMatcher(cv.NORM_HAMMING, true);
+      matcher.match(descriptors1, descriptors2, matches);
+
+      let goodMatches = new cv.DMatchVector();
+      for (let i = 0; i < matches.size(); ++i) {
+        if (matches.get(i).distance < threshold) {
+          goodMatches.push_back(matches.get(i));
+        }
+      }
+      return goodMatches;
+    }
+
+    async function findTranslationBetweenImages({ indexImg1, indexImg2, images, threshold, nbFeatures }) {
+      const image1 = images[indexImg1].img;
+      const image2 = images[indexImg2].img;
+      console.log(">>>", indexImg1,
+        indexImg2, images)
+      let matImage1 = cv.imread(image1);
+      let matImage2 = cv.imread(image2);
+
+      let rois = extractROIs(matImage1);
+      let { keypoints: keypointsImage2, descriptors: descriptorsImage2 } = detectFeatures(matImage2, nbFeatures);
+
+      for (let roi of rois) {
+        let { keypoints: keypointsROI, descriptors: descriptorsROI } = detectFeatures(roi, nbFeatures);
+        let matches = matchFeatures(descriptorsROI, descriptorsImage2, threshold);
+        console.log(`Found ${matches.size()} matches with threshold: ${threshold}`);
+        if (matches.size() < 10) {
+          continue;
+        }
+        let translation = calculateTranslation({
+          keypoints1: keypointsROI,
+          keypoints2: keypointsImage2,
+          matches
+        }, {
+          indexImg1,
+          indexImg2
+        })
+
+        if (translation) {
+          console.log(`Translation for ROI: dx = ${translation.x}, dy = ${translation.y}`);
+          return translation;
+        }
+
+        // Cleanup ROI resources
+        keypointsROI.delete();
+        descriptorsROI.delete();
+        matches.delete();
+        roi.delete();
+      }
+
+      // Cleanup
+      matImage1.delete();
+      matImage2.delete();
+      keypointsImage2.delete();
+      descriptorsImage2.delete();
+      console.log('No translation found with threshold: ' + threshold);
+      return null;
+    }
+
+    function drawMatchesOnCanvas(canvasId, keypoint) {
+      let canvas = document.getElementById(canvasId);
+      let ctx = canvas.getContext('2d');
+
+      let x = keypoint.x;
+      let y = keypoint.y;
+
+      ctx.strokeStyle = 'black'; // Color for the cross
+      ctx.lineWidth = 12; // Line width for the cross
+
+      // Draw a cross or point at (x, y)
+      // Drawing a small cross
+      ctx.beginPath();
+      ctx.moveTo(x - 15, y);
+      ctx.lineTo(x + 15, y);
+      ctx.moveTo(x, y - 15);
+      ctx.lineTo(x, y + 15);
+      ctx.stroke();
+
+      ctx.strokeStyle = 'white'; // Color for the cross
+      ctx.lineWidth = 8; // Line width for the cross
+
+      // Draw a cross or point at (x, y)
+      // Drawing a small cross
+      ctx.beginPath();
+      ctx.moveTo(x - 12, y);
+      ctx.lineTo(x + 12, y);
+      ctx.moveTo(x, y - 12);
+      ctx.lineTo(x, y + 12);
+      ctx.stroke();
+
+      ctx.strokeStyle = 'red'; // Color for the cross
+      ctx.lineWidth = 2; // Line width for the cross
+
+      // Draw a cross or point at (x, y)
+      // Drawing a small cross
+      ctx.beginPath();
+      ctx.moveTo(x - 8, y);
+      ctx.lineTo(x + 8, y);
+      ctx.moveTo(x, y - 8);
+      ctx.lineTo(x, y + 8);
+      ctx.stroke();
+
+      // draw a circle around the point
+      ctx.beginPath();
+      ctx.arc(x, y, 18, 0, 2 * Math.PI);
+      ctx.stroke();
+
+    }
+
+    function calculateTranslation({ keypoints1, keypoints2, matches }, { indexImg1, indexImg2 }) {
+      const diffs = {};
+
+      for (let i = 0; i < matches.size(); ++i) {
+        let match = matches.get(i);
+        if (match.queryIdx < keypoints1.size() && match.trainIdx < keypoints2.size()) {
+          let pt1 = keypoints1.get(match.queryIdx).pt;
+          let pt2 = keypoints2.get(match.trainIdx).pt;
+
+          let diffX = pt1.x - pt2.x;
+          let diffY = pt1.y - pt2.y;
+          let diffKey = `${diffX},${diffY}`;
+
+          if (diffs[diffKey]) {
+            diffs[diffKey].count++;
+            diffs[diffKey].points.push({ pt1, pt2 });
+          } else {
+            diffs[diffKey] = { diffX, diffY, count: 1, points: [{ pt1, pt2 }] };
+          }
+        }
+      }
+
+      let bestMatch = Object.values(diffs).find(d => d.count >= 5);
+      if (bestMatch) {
+        bestMatch.points.forEach(({ pt1, pt2 }) => {
+          drawMatchesOnCanvas('canvas' + indexImg1, pt1);
+          drawMatchesOnCanvas('canvas' + indexImg2, pt2);
+        });
+        return { x: bestMatch.diffX, y: bestMatch.diffY };
+      } else {
+        console.error('No consistent matches found');
+        return null;
+      }
+    }
+
+    function getNextTreshold(currentTreshold) {
+      // exponential increase of the threshold
+      // from 5 to 10, to 20, to 35, to 50, to 70, to 100, to 150, to 200, to 300, to 400, to 600
+      if (currentTreshold < 10) {
+        return currentTreshold + 5;
+      } else if (currentTreshold < 20) {
+        return currentTreshold + 10;
+      } else if (currentTreshold < 35) {
+        return currentTreshold + 15;
+      } else if (currentTreshold < 50) {
+        return currentTreshold + 20;
+      } else if (currentTreshold < 70) {
+        return currentTreshold + 25;
+      } else if (currentTreshold < 100) {
+        return currentTreshold + 30;
+      } else if (currentTreshold < 150) {
+        return currentTreshold + 50;
+      } else if (currentTreshold < 200) {
+        return currentTreshold + 100;
+      } else if (currentTreshold < 300) {
+        return currentTreshold + 200;
+      } else if (currentTreshold < 400) {
+        return currentTreshold + 300;
+      } else if (currentTreshold < 600) {
+        return currentTreshold + 400;
+      } else {
+        return currentTreshold + 600;
+      }
+    }
+
+    async function findMatchesForImage(imageIndex, images, alreadyMatched, translations, threshold = 5, nbFeatures = 300) {
+      for (let i = 0; i < images.length; i++) {
+        if (i !== imageIndex && !alreadyMatched.has(i)) {
+          let translation = null;
+          while (translation == null && threshold <= 600) {
+            translation = await findTranslationBetweenImages(
+              { indexImg1: imageIndex, indexImg2: i, images, threshold, nbFeatures }
+            );
+            threshold = getNextTreshold(threshold);
+            nbFeatures = nbFeatures += 100;
+          }
+          if (translation) {
+            translations.push({ baseIndex: imageIndex, nextIndex: i, translation: { ...translation } });
+            alreadyMatched.add(i);
+            await findMatchesForImage(i, images, alreadyMatched, translations); // Recursive call
+          }
+          threshold = 5; // Reset threshold for next image pair
+        }
+      }
+    }
+
+    async function stitchImagesSequentially(images) {
+      if (images.length < 2) {
+        console.error('Not enough images to stitch');
+        return;
+      }
+
+      let translations = [];
+      let alreadyMatched = new Set([0]); // Start with the first image
+
+      await findMatchesForImage(0, images, alreadyMatched, translations);
+
+      if (translations.length > 0) {
+        let globalTranslations = computeGlobalTranslations(images, translations);
+        let canvasSize = determineCanvasSize(images, globalTranslations);
+        drawStitchedImages(images, globalTranslations, canvasSize);
+        return true;
+      } else {
+        console.error('No matches found to stitch any images');
+        alert('No matches found to stitch any images')
+        return false;
+      }
+    }
+
+    function computeGlobalTranslations(images, translations) {
+      let globalTranslations = new Array(images.length).fill({ x: 0, y: 0 });
+      let baseImageTranslation = { x: 0, y: 0 }; // Assuming the first image as the reference
+
+      translations.forEach(({ baseIndex, nextIndex, translation }) => {
+        // Apply the base image translation to the next image
+        globalTranslations[nextIndex] = {
+          x: baseImageTranslation.x + translation.x,
+          y: baseImageTranslation.y + translation.y
+        };
+      });
+
+      return globalTranslations;
+    }
+
+    function determineCanvasSize(images, globalTranslations) {
+      let minX = 0, minY = 0, maxX = 0, maxY = 0;
+
+      images.forEach((image, index) => {
+        let trans = globalTranslations[index];
+        minX = Math.min(minX, trans.x);
+        minY = Math.min(minY, trans.y);
+        maxX = Math.max(maxX, trans.x + image.img.width);
+        maxY = Math.max(maxY, trans.y + image.img.height);
+      });
+
+      return { width: maxX - minX, height: maxY - minY, offsetX: -minX, offsetY: -minY };
+    }
+
+    function drawStitchedImages(images, globalTranslations, canvasSize) {
+      let canvas = document.getElementById('canvasImagesStitched');
+      let ctx = canvas.getContext('2d');
+
+      canvas.width = canvasSize.width;
+      canvas.height = canvasSize.height;
+
+      images.forEach((image, index) => {
+        let trans = globalTranslations[index];
+        ctx.drawImage(image.img, trans.x + canvasSize.offsetX, trans.y + canvasSize.offsetY);
+      });
+    }
+  </script>
+  <script async src="https://docs.opencv.org/master/opencv.js" type="text/javascript"></script>
+</body>
+
+</html>
