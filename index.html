@@ -148,8 +148,6 @@
     async function findTranslationBetweenImages({ indexImg1, indexImg2, images, threshold, nbFeatures }) {
       const image1 = images[indexImg1].img;
       const image2 = images[indexImg2].img;
-      console.log(">>>", indexImg1,
-        indexImg2, images)
       let matImage1 = cv.imread(image1);
       let matImage2 = cv.imread(image2);
 
@@ -160,7 +158,7 @@
         let { keypoints: keypointsROI, descriptors: descriptorsROI } = detectFeatures(roi, nbFeatures);
         let matches = matchFeatures(descriptorsROI, descriptorsImage2, threshold);
         console.log(`Found ${matches.size()} matches with threshold: ${threshold}`);
-        if (matches.size() < 10) {
+        if (matches.size() < 20) {
           continue;
         }
         let translation = calculateTranslation({
