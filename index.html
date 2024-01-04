@@ -112,26 +112,10 @@
     function extractROIs(mat) {
       const height = mat.rows;
       const width = mat.cols;
-      const roiSize = 50; // Size of the ROI
 
       const rois = [
         // the complete image
         new cv.Rect(0, 0, width, height),
-
-        // Corners
-        new cv.Rect(0, 0, roiSize, roiSize), // Top-left corner
-        new cv.Rect(width - roiSize, 0, roiSize, roiSize), // Top-right corner
-        new cv.Rect(0, height - roiSize, roiSize, roiSize), // Bottom-left corner
-        new cv.Rect(width - roiSize, height - roiSize, roiSize, roiSize), // Bottom-right corner
-
-        // Middle of each edge
-        new cv.Rect(width / 2 - roiSize / 2, 0, roiSize, roiSize), // Top edge
-        new cv.Rect(width / 2 - roiSize / 2, height - roiSize, roiSize, roiSize), // Bottom edge
-        new cv.Rect(0, height / 2 - roiSize / 2, roiSize, roiSize), // Left edge
-        new cv.Rect(width - roiSize, height / 2 - roiSize / 2, roiSize, roiSize), // Right edge
-
-        // Center of the image
-        new cv.Rect(width / 2 - roiSize / 2, height / 2 - roiSize / 2, roiSize, roiSize) // Center
       ];
 
       return rois.map(roi => mat.roi(roi));
